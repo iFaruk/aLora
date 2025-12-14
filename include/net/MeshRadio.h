@@ -27,6 +27,7 @@ private:
   static void processReceivedPackets(void* pv);
 
   void onRxPacket(uint16_t src, const WireChatPacket& pkt, int16_t rssi, float snr);
+  void sendAck(uint16_t dst, uint32_t refMsgId);
 
   void* _rxTaskHandle = nullptr; // TaskHandle_t (kept void* to avoid extra includes in header)
   volatile uint32_t _rxCount = 0;

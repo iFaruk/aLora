@@ -25,6 +25,17 @@ private:
   MeshRadio* _radio = nullptr;
   ChatLog* _log = nullptr;
 
+  struct PendingSend {
+    bool active = false;
+    uint16_t dst = 0;
+    uint8_t attempts = 0;
+    uint32_t lastSendMs = 0;
+    WireChatPacket pkt{};
+  };
+
+  static constexpr size_t kMaxPending = 4;
+  PendingSend _pending[kMaxPending];
+
   Screen _screen = Screen::Chat;
   uint32_t _lastDrawMs = 0;
 
@@ -54,4 +65,7 @@ private:
   void advanceCursor(int32_t delta);
   void syncCharIndexToDraft();
   void sendDraft();
+  void recordPending(const WireChatPacket& pkt);
+  void updateReliability();
+  void clearPending(uint32_t msgId);
 };
