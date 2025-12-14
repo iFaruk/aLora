@@ -5,9 +5,29 @@
 #include "util/Crypto.h"
 
 static const char* kCharset = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?-_/@";
+static const uint8_t kGroupStarts[] = {0, 1, 27, 37};
+static const char* kShortcuts[] = {"OK", "ACK", "OMW", "PING?", "HERE"};
+static constexpr size_t kShortcutCount = sizeof(kShortcuts) / sizeof(kShortcuts[0]);
 
 Ui::Ui(IDisplay* display, RotaryInput* input, MeshRadio* radio, ChatLog* log, PairingStore* pairs)
 : _d(display), _in(input), _radio(radio), _log(log), _pairs(pairs) {}
+
+static uint8_t findGroupBoundary(uint8_t current, bool forward) {
+  size_t groups = sizeof(kGroupStarts) / sizeof(kGroupStarts[0]);
+  if (forward) {
+    for (size_t i = 0; i < groups; i++) {
+      if (kGroupStarts[i] > current) return kGroupStarts[i];
+    }
+    return kGroupStarts[0];
+  }
+
+  // backward search
+  uint8_t best = kGroupStarts[groups - 1];
+  for (size_t i = 0; i < groups; i++) {
+    if (kGroupStarts[i] < current) best = kGroupStarts[i];
+  }
+  return best;
+}
 
 void Ui::begin() {
   _lastDrawMs = 0;
@@ -17,6 +37,7 @@ void Ui::begin() {
 
 void Ui::onIncoming(uint16_t src, const WireChatPacket& pkt) {
   uint16_t me = _radio ? _radio->localAddress() : 0;
+  recordSeenPeer(src, _pairs && _pairs->hasKey(src));
 
   switch (pkt.kind) {
     case PacketKind::Ack:
@@ -71,9 +92,13 @@ void Ui::handleClick() {
     return;
   }
 
-  if (_screen == Screen::Chat) _screen = Screen::Compose;
-  else if (_screen == Screen::Compose) _screen = Screen::Status;
+  if (_screen == Screen::Chat) _screen = Screen::Contacts;
+  else if (_screen == Screen::Contacts) {
+    selectContactTarget();
+    _screen = Screen::Compose;
+  }
   else if (_screen == Screen::Status) _screen = Screen::Settings;
+  else if (_screen == Screen::Settings) _screen = Screen::Chat;
   else _screen = Screen::Chat;
 }
 
@@ -82,9 +107,18 @@ void Ui::handleDelta(int32_t delta) {
     case Screen::Chat: {
       _chatScroll += (delta > 0 ? 1 : -1);
       if (_chatScroll < 0) _chatScroll = 0;
-      int maxScroll = (int)_log->size() - 1;
+      int maxScroll = (int)filteredChatCount() - 1;
       if (maxScroll < 0) maxScroll = 0;
       if (_chatScroll > maxScroll) _chatScroll = maxScroll;
+      break;
+    }
+    case Screen::Contacts: {
+      int32_t next = (int32_t)_contactScroll + (delta > 0 ? 1 : -1);
+      int32_t max = (int32_t)contactListLength() - 1;
+      if (next < 0) next = 0;
+      if (next > max) next = max;
+      _contactScroll = (uint8_t)next;
+      _contactSelection = _contactScroll;
       break;
     }
     case Screen::Compose: {
@@ -101,12 +135,20 @@ void Ui::handleDelta(int32_t delta) {
 void Ui::handleComposeClick() {
   switch (_focus) {
     case ComposeFocus::Destination:
+      _focus = (contactListLength() > 1) ? ComposeFocus::Contact : ComposeFocus::Cursor;
+      break;
+    case ComposeFocus::Contact:
+      selectContactTarget();
       _focus = ComposeFocus::Cursor;
       break;
     case ComposeFocus::Cursor:
       _focus = ComposeFocus::Character;
       break;
     case ComposeFocus::Character:
+      _focus = ComposeFocus::Shortcut;
+      break;
+    case ComposeFocus::Shortcut:
+      applyShortcut();
       _focus = ComposeFocus::Send;
       break;
     case ComposeFocus::Send:
@@ -126,19 +168,43 @@ void Ui::handleComposeDelta(int32_t delta) {
       _dst = (uint16_t)nd;
       break;
     }
+    case ComposeFocus::Contact: {
+      size_t len = contactListLength();
+      if (len <= 1) break;
+      int32_t next = (int32_t)_contactSelection + (delta > 0 ? 1 : -1);
+      int32_t max = (int32_t)len - 1;
+      if (next < 0) next = 0;
+      if (next > max) next = max;
+      _contactSelection = (uint8_t)next;
+      selectContactTarget();
+      break;
+    }
     case ComposeFocus::Cursor:
       advanceCursor(delta);
       syncCharIndexToDraft();
       break;
     case ComposeFocus::Character: {
       size_t n = std::strlen(kCharset);
-      int32_t idx = (int32_t)_charIndex + delta;
-      while (idx < 0) idx += (int32_t)n;
-      idx %= (int32_t)n;
+      int32_t idx = 0;
+      if (delta > 3 || delta < -3) {
+        idx = (int32_t)findGroupBoundary(_charIndex, delta > 0);
+      } else {
+        idx = (int32_t)_charIndex + delta;
+        while (idx < 0) idx += (int32_t)n;
+        idx %= (int32_t)n;
+      }
       _charIndex = (uint8_t)idx;
 
       _draft[_cursor] = kCharset[_charIndex];
       _draft[sizeof(_draft)-1] = '\0';
+      break;
+    }
+    case ComposeFocus::Shortcut: {
+      if (delta == 0) break;
+      int32_t next = (int32_t)_shortcutIdx + (delta > 0 ? 1 : -1);
+      if (next < 0) next = (int32_t)kShortcutCount - 1;
+      if (next >= (int32_t)kShortcutCount) next = 0;
+      _shortcutIdx = (uint8_t)next;
       break;
     }
     case ComposeFocus::Send:
@@ -172,6 +238,43 @@ void Ui::syncCharIndexToDraft() {
   }
 }
 
+void Ui::applyShortcut() {
+  if (kShortcutCount == 0) return;
+  const char* phrase = kShortcuts[_shortcutIdx % kShortcutCount];
+  size_t phraseLen = std::strnlen(phrase, sizeof(_draft));
+  size_t room = sizeof(_draft) - 1;
+  size_t curLen = std::strnlen(_draft, room);
+  if (_cursor > curLen) _cursor = (uint8_t)curLen;
+  if (phraseLen > room - _cursor) phraseLen = room - _cursor;
+
+  size_t movable = (curLen > _cursor) ? (curLen - _cursor) : 0;
+  if (movable > room - _cursor - phraseLen) movable = room - _cursor - phraseLen;
+
+  std::memmove(_draft + _cursor + phraseLen, _draft + _cursor, movable + 1); // include null
+  std::memcpy(_draft + _cursor, phrase, phraseLen);
+  _cursor += (uint8_t)phraseLen;
+  _draft[room] = '\0';
+  syncCharIndexToDraft();
+}
+
+void Ui::selectContactTarget() {
+  SeenPeer peer{};
+  if (!contactAt(_contactSelection, peer)) return;
+
+  if (peer.addr == 0) {
+    _chatPeerFilter = 0;
+    return;
+  }
+
+  _dst = peer.addr;
+  _chatPeerFilter = peer.addr;
+  recordSeenPeer(peer.addr, peer.paired);
+
+  int maxScroll = (int)filteredChatCount() - 1;
+  if (maxScroll < 0) maxScroll = 0;
+  if (_chatScroll > maxScroll) _chatScroll = maxScroll;
+}
+
 void Ui::sendDraft() {
   if (!_radio) return;
 
@@ -200,6 +303,7 @@ void Ui::sendDraft() {
 
   _radio->sendDm(_dst, pkt);
   recordPending(pkt);
+  recordSeenPeer(_dst, _pairs && _pairs->hasKey(_dst));
 
   if (_log) {
     _log->add(_dst, true, pkt.msgId, pkt.text, pkt.ts);
@@ -252,6 +356,7 @@ void Ui::sendSecureDraft() {
 
   _radio->sendDm(_dst, pkt);
   recordPending(pkt);
+  recordSeenPeer(_dst, true);
 
   if (_log) {
     _log->add(_dst, true, pkt.msgId, _draft, pkt.ts);
@@ -320,6 +425,7 @@ void Ui::handlePairRequest(uint16_t src, const WireChatPacket& pkt) {
   uint32_t acceptNonce = nextNonce();
   if (_pairs->deriveFromRequest(src, pkt.msgId, pkt.nonce, acceptNonce, key)) {
     notePairing(src, "Paired via incoming request.");
+    recordSeenPeer(src, true);
   }
   sendPairAccept(src, pkt, acceptNonce);
 }
@@ -332,6 +438,7 @@ void Ui::handlePairAccept(uint16_t src, const WireChatPacket& pkt) {
   uint8_t key[PairingStore::kKeyLen] = {0};
   if (_pairs->resolvePendingRequest(src, pkt.refMsgId, pkt.nonce, key)) {
     notePairing(src, "Pairing accepted.");
+    recordSeenPeer(src, true);
   }
 }
 
@@ -450,6 +557,7 @@ void Ui::sendPairRequest(uint16_t dst) {
   _radio->sendDm(dst, pkt);
   _pairs->recordOutgoingRequest(dst, pkt.msgId, pkt.nonce);
   notePairing(dst, "Sent pairing request.");
+  recordSeenPeer(dst, false);
 }
 
 void Ui::sendPairAccept(uint16_t dst, const WireChatPacket& req, uint32_t acceptNonce) {
@@ -488,6 +596,102 @@ uint32_t Ui::nextNonce() const {
   return seed ^ 0xA5A5BEEF;
 }
 
+void Ui::recordSeenPeer(uint16_t addr, bool paired) {
+  if (addr == 0) return;
+
+  uint32_t now = (uint32_t)(millis() / 1000);
+  size_t slot = kMaxSeenPeers;
+  for (size_t i = 0; i < kMaxSeenPeers; i++) {
+    if (_seen[i].active && _seen[i].addr == addr) { slot = i; break; }
+  }
+
+  if (slot == kMaxSeenPeers) {
+    for (size_t i = 0; i < kMaxSeenPeers; i++) {
+      if (!_seen[i].active) { slot = i; break; }
+    }
+  }
+
+  if (slot == kMaxSeenPeers) {
+    uint32_t oldest = UINT32_MAX;
+    size_t oldestIdx = 0;
+    for (size_t i = 0; i < kMaxSeenPeers; i++) {
+      if (_seen[i].lastSeenSec <= oldest) {
+        oldest = _seen[i].lastSeenSec;
+        oldestIdx = i;
+      }
+    }
+    slot = oldestIdx;
+  }
+
+  SeenPeer& s = _seen[slot];
+  s.active = true;
+  s.addr = addr;
+  s.lastSeenSec = now;
+  if (paired) s.paired = true;
+}
+
+size_t Ui::contactCount() const {
+  size_t n = 0;
+  for (size_t i = 0; i < kMaxSeenPeers; i++) {
+    if (_seen[i].active) n++;
+  }
+  return n;
+}
+
+size_t Ui::contactListLength() const {
+  // include "All" row
+  return contactCount() + 1;
+}
+
+bool Ui::contactAt(size_t idx, SeenPeer& out) const {
+  if (idx == 0) {
+    out.active = true;
+    out.addr = 0;
+    out.paired = false;
+    out.lastSeenSec = 0;
+    return true;
+  }
+
+  size_t rank = idx - 1;
+  bool used[kMaxSeenPeers] = {false};
+
+  for (size_t r = 0; r <= rank; r++) {
+    size_t bestSlot = kMaxSeenPeers;
+    uint32_t bestSeen = 0;
+    for (size_t i = 0; i < kMaxSeenPeers; i++) {
+      if (!_seen[i].active || used[i]) continue;
+      if (bestSlot == kMaxSeenPeers || _seen[i].lastSeenSec > bestSeen) {
+        bestSlot = i;
+        bestSeen = _seen[i].lastSeenSec;
+      }
+    }
+
+    if (bestSlot == kMaxSeenPeers) return false;
+    if (r == rank) {
+      out = _seen[bestSlot];
+      return true;
+    }
+    used[bestSlot] = true;
+  }
+
+  return false;
+}
+
+bool Ui::matchesChatFilter(const ChatMsg& m) const {
+  if (_chatPeerFilter == 0) return true;
+  return m.src == _chatPeerFilter;
+}
+
+size_t Ui::filteredChatCount() const {
+  if (!_log) return 0;
+  size_t total = 0;
+  size_t sz = _log->size();
+  for (size_t i = 0; i < sz; i++) {
+    if (matchesChatFilter(_log->at(i))) total++;
+  }
+  return total;
+}
+
 void Ui::sendAck(uint16_t dst, uint32_t refMsgId) {
   WireChatPacket ack{};
   ack.kind = PacketKind::Ack;
@@ -518,6 +722,7 @@ void Ui::tick() {
 
   switch (_screen) {
     case Screen::Chat: drawChat(); break;
+    case Screen::Contacts: drawContacts(); break;
     case Screen::Compose: drawCompose(); break;
     case Screen::Status: drawStatus(); break;
     case Screen::Settings: drawSettings(); break;
@@ -531,22 +736,42 @@ void Ui::drawChat() {
   int h = _d->height();
 
   _d->setFontUi();
-  _d->drawStr(2, 12, "CHAT (click=next)");
+  char title[28];
+  if (_chatPeerFilter == 0) snprintf(title, sizeof(title), "CHAT (click=contacts)");
+  else snprintf(title, sizeof(title), "CHAT %u", (unsigned)_chatPeerFilter);
+  _d->drawStr(2, 12, title);
   _d->drawHLine(0, 14, w);
 
   _d->setFontSmall();
 
+  size_t matchCount = filteredChatCount();
+  if (matchCount == 0) {
+    _d->drawStr(2, 32, "No messages yet.");
+    _d->drawStr(2, 44, "Rotate to refresh list.");
+    return;
+  }
+
   int y = 28;
   int lineH = 12;
-
   int total = (int)_log->size();
-  int idxNewest = total - 1 - _chatScroll;
 
-  for (int lines = 0; lines < 8 && y < h; lines++) {
-    int idx = idxNewest - lines;
-    if (idx < 0) break;
+  int idxNewest = -1;
+  size_t seen = 0;
+  for (int i = total - 1; i >= 0; --i) {
+    const ChatMsg& m = _log->at((size_t)i);
+    if (!matchesChatFilter(m)) continue;
+    if (seen == (size_t)_chatScroll) { idxNewest = i; break; }
+    seen++;
+  }
 
-    const ChatMsg& m = _log->at((size_t)idx);
+  if (idxNewest < 0) idxNewest = total - 1;
+
+  for (int lines = 0; lines < 8 && y < h; ) {
+    if (idxNewest < 0) break;
+
+    const ChatMsg& m = _log->at((size_t)idxNewest);
+    idxNewest--;
+    if (!matchesChatFilter(m)) continue;
 
     const char* state = "";
     if (m.outgoing) {
@@ -566,6 +791,48 @@ void Ui::drawChat() {
     _d->drawStr(2, y + 10, snippet);
 
     y += (lineH * 2);
+    lines++;
+  }
+}
+
+void Ui::drawContacts() {
+  int w = _d->width();
+  _d->setFontUi();
+  _d->drawStr(2, 12, "CONTACTS (click=set)");
+  _d->drawHLine(0, 14, w);
+
+  _d->setFontSmall();
+  size_t len = contactListLength();
+  if (len <= 1) {
+    _d->drawStr(2, 32, "No peers yet.");
+    _d->drawStr(2, 46, "Rotate after beacons.");
+    return;
+  }
+
+  uint32_t now = (uint32_t)(millis() / 1000);
+  int lineH = 12;
+  int yBase = 28;
+
+  for (size_t row = 0; row < 6; row++) {
+    size_t idx = (size_t)_contactScroll + row;
+    if (idx >= len) break;
+
+    SeenPeer peer{};
+    if (!contactAt(idx, peer)) continue;
+
+    char line[32];
+    if (peer.addr == 0) {
+      std::snprintf(line, sizeof(line), "[ALL CHATS]");
+    } else {
+      uint32_t age = (peer.lastSeenSec <= now) ? (now - peer.lastSeenSec) : 0;
+      std::snprintf(line, sizeof(line), "%c%u (%lus)", peer.paired ? 'P' : 'S', (unsigned)peer.addr, (unsigned long)age);
+    }
+
+    int y = yBase + (int)(row * lineH);
+    if (idx == _contactSelection) {
+      _d->drawFrame(0, y - 2, w, lineH);
+    }
+    _d->drawStr(2, y, line);
   }
 }
 
@@ -583,29 +850,41 @@ void Ui::drawCompose() {
   _d->drawStr(2, 28, line1);
 
   const char* focusLabel = "DST";
-  if (_focus == ComposeFocus::Cursor) focusLabel = "CUR";
+  if (_focus == ComposeFocus::Contact) focusLabel = "CNT";
+  else if (_focus == ComposeFocus::Cursor) focusLabel = "CUR";
   else if (_focus == ComposeFocus::Character) focusLabel = "CHAR";
+  else if (_focus == ComposeFocus::Shortcut) focusLabel = "SHOT";
   else if (_focus == ComposeFocus::Send) focusLabel = "SEND";
 
   char focusLine[28];
   snprintf(focusLine, sizeof(focusLine), "Focus:%s", focusLabel);
   _d->drawStr(2, 40, focusLine);
 
+  SeenPeer sel{};
+  contactAt(_contactSelection, sel);
+  char contactLine[28];
+  if (sel.addr == 0) snprintf(contactLine, sizeof(contactLine), "Contact:All chats");
+  else snprintf(contactLine, sizeof(contactLine), "Contact:%u%s", (unsigned)sel.addr, sel.paired ? "*" : "");
+  _d->drawStr(2, 52, contactLine);
+
   char cursorLine[28];
   snprintf(cursorLine, sizeof(cursorLine), "Cursor:%u", (unsigned)_cursor);
-  _d->drawStr(2, 52, cursorLine);
+  _d->drawStr(2, 64, cursorLine);
 
-  _d->drawStr(2, 68, "Text:");
-  _d->drawFrame(0, 72, w, 32);
+  char shortcutLine[28];
+  snprintf(shortcutLine, sizeof(shortcutLine), "Shortcut:%s", kShortcuts[_shortcutIdx % kShortcutCount]);
+  _d->drawStr(2, 76, shortcutLine);
+
+  _d->drawStr(2, 92, "Text:");
+  _d->drawFrame(0, 96, w, 28);
 
   // Render the draft (one line for now)
   char shown[18];
   std::strncpy(shown, _draft, sizeof(shown)-1);
   shown[sizeof(shown)-1] = '\0';
-  _d->drawStr(2, 86, shown);
+  _d->drawStr(2, 108, shown);
 
-  _d->drawStr(2, 108, "Click: focus/send");
-  _d->drawStr(2, 120, "Rotate: move/edit");
+  _d->drawStr(2, 122, "Click: focus/send");
 }
 
 void Ui::drawStatus() {
