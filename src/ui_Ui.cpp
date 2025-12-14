@@ -44,6 +44,7 @@ void Ui::onIncoming(uint16_t src, const WireChatPacket& pkt) {
       if (pkt.to != me) return;
       if (_log) _log->markDelivered(pkt.refMsgId);
       clearPending(pkt.refMsgId);
+      noteDeliverySuccess(src);
       return;
     case PacketKind::Discovery:
       if (pkt.to != me && pkt.to != 0xFFFF) return;
@@ -301,8 +302,13 @@ void Ui::sendDraft() {
   std::strncpy(pkt.text, _draft, sizeof(pkt.text) - 1);
   pkt.text[sizeof(pkt.text) - 1] = '\0';
 
-  _radio->sendDm(_dst, pkt);
-  recordPending(pkt);
+  bool sent = _radio->sendDm(_dst, pkt);
+  uint32_t delay = computeRetryDelayMs(1);
+  if (!sent && _radio) {
+    uint32_t hold = _radio->msUntilAirtimeReset(millis());
+    if (hold > delay) delay = hold;
+  }
+  recordPending(pkt, sent ? 1 : 0, delay);
   recordSeenPeer(_dst, _pairs && _pairs->hasKey(_dst));
 
   if (_log) {
@@ -354,8 +360,13 @@ void Ui::sendSecureDraft() {
   memcpy(pkt.text, cipher, plainLen);
   if (plainLen < sizeof(pkt.text)) pkt.text[plainLen] = '\0';
 
-  _radio->sendDm(_dst, pkt);
-  recordPending(pkt);
+  bool sent = _radio->sendDm(_dst, pkt);
+  uint32_t delay = computeRetryDelayMs(1);
+  if (!sent && _radio) {
+    uint32_t hold = _radio->msUntilAirtimeReset(millis());
+    if (hold > delay) delay = hold;
+  }
+  recordPending(pkt, sent ? 1 : 0, delay);
   recordSeenPeer(_dst, true);
 
   if (_log) {
@@ -363,16 +374,16 @@ void Ui::sendSecureDraft() {
   }
 }
 
-void Ui::recordPending(const WireChatPacket& pkt) {
+void Ui::recordPending(const WireChatPacket& pkt, uint8_t initialAttempts, uint32_t firstDelayMs) {
   for (size_t i = 0; i < kMaxPending; i++) {
     PendingSend& slot = _pending[i];
     if (slot.active) continue;
     slot.active = true;
     slot.dst = pkt.to;
-    slot.attempts = 1;
+    slot.attempts = initialAttempts;
     slot.discoverySent = false;
-    slot.lastSendMs = millis();
-    slot.nextSendMs = slot.lastSendMs + computeRetryDelayMs(slot.attempts);
+    slot.lastSendMs = (initialAttempts > 0) ? millis() : 0;
+    slot.nextSendMs = millis() + firstDelayMs;
     slot.pkt = pkt;
     return;
   }
@@ -494,15 +505,25 @@ void Ui::updateReliability() {
   const uint8_t maxUnicastAttempts = 3;
   const uint8_t maxTotalAttempts = 5;
   const uint32_t discoveryCooldownMs = 5000;
+  const uint32_t airtimeDeferralFloorMs = 1200;
 
   for (size_t i = 0; i < kMaxPending; i++) {
     PendingSend& slot = _pending[i];
     if (!slot.active) continue;
 
+    bool recentlySent = (slot.lastSendMs != 0) && ((now - slot.lastSendMs) < 2000);
+    if (!slot.discoverySent && slot.attempts > 0 && !recentlySent && routeIsStale(slot.dst, now)) {
+      if (escalateDiscovery(slot, now)) {
+        slot.nextSendMs = now + discoveryCooldownMs;
+        continue;
+      }
+    }
+
     if (slot.attempts >= maxUnicastAttempts && !slot.discoverySent) {
       if (now >= slot.nextSendMs) {
-        escalateDiscovery(slot, now);
-        slot.nextSendMs = now + discoveryCooldownMs;
+        if (escalateDiscovery(slot, now)) {
+          slot.nextSendMs = now + discoveryCooldownMs;
+        }
       }
       continue;
     }
@@ -517,18 +538,31 @@ void Ui::updateReliability() {
 
     if (now < slot.nextSendMs) continue;
 
-    _radio->sendDm(slot.dst, slot.pkt);
+    if (!_radio->sendDm(slot.dst, slot.pkt)) {
+      uint32_t hold = _radio->msUntilAirtimeReset(now);
+      if (hold < airtimeDeferralFloorMs) hold = airtimeDeferralFloorMs;
+      slot.nextSendMs = now + hold;
+      continue;
+    }
+
     slot.attempts++;
     slot.lastSendMs = now;
     slot.nextSendMs = now + computeRetryDelayMs(slot.attempts);
   }
 }
 
-void Ui::escalateDiscovery(PendingSend& slot, uint32_t now) {
-  if (!_radio) return;
-  _radio->sendDiscovery(slot.dst, slot.pkt.msgId);
-  slot.discoverySent = true;
-  slot.lastSendMs = now;
+bool Ui::escalateDiscovery(PendingSend& slot, uint32_t now) {
+  if (!_radio) return false;
+  bool sent = _radio->sendDiscovery(slot.dst, slot.pkt.msgId);
+  if (sent) {
+    RouteHealth* r = routeFor(slot.dst);
+    if (r) r->lastDiscoveryMs = now;
+    slot.discoverySent = true;
+    slot.lastSendMs = now;
+  } else {
+    slot.nextSendMs = now + computeRetryDelayMs(slot.attempts + 1);
+  }
+  return sent;
 }
 
 uint32_t Ui::computeRetryDelayMs(uint8_t attempt) const {
@@ -690,6 +724,56 @@ size_t Ui::filteredChatCount() const {
     if (matchesChatFilter(_log->at(i))) total++;
   }
   return total;
+}
+
+Ui::RouteHealth* Ui::routeFor(uint16_t dst) {
+  size_t freeIdx = kMaxRoutes;
+  size_t oldestIdx = 0;
+  uint32_t oldestTs = 0xFFFFFFFFUL;
+  bool haveOld = false;
+
+  for (size_t i = 0; i < kMaxRoutes; i++) {
+    RouteHealth& r = _routes[i];
+    if (r.active && r.dst == dst) return &r;
+    if (!r.active && freeIdx == kMaxRoutes) freeIdx = i;
+
+    uint32_t freshness = r.lastAckMs ? r.lastAckMs : r.lastDiscoveryMs;
+    if (!r.active) freshness = 0;
+    if (!haveOld || freshness < oldestTs) {
+      haveOld = true;
+      oldestIdx = i;
+      oldestTs = freshness;
+    }
+  }
+
+  if (freeIdx != kMaxRoutes) return &_routes[freeIdx];
+  return &_routes[oldestIdx];
+}
+
+const Ui::RouteHealth* Ui::routeFor(uint16_t dst) const {
+  for (size_t i = 0; i < kMaxRoutes; i++) {
+    const RouteHealth& r = _routes[i];
+    if (r.active && r.dst == dst) return &r;
+  }
+  return nullptr;
+}
+
+void Ui::noteDeliverySuccess(uint16_t dst) {
+  RouteHealth* r = routeFor(dst);
+  if (!r) return;
+  r->active = true;
+  r->dst = dst;
+  if (r->successStreak < 250) r->successStreak++;
+  r->lastAckMs = millis();
+}
+
+bool Ui::routeIsStale(uint16_t dst, uint32_t now) const {
+  const RouteHealth* r = routeFor(dst);
+  const uint32_t freshnessMs = 45000;
+  if (!r) return true;
+  uint32_t anchor = r->lastAckMs ? r->lastAckMs : r->lastDiscoveryMs;
+  if (anchor == 0) return true;
+  return (now - anchor) > freshnessMs;
 }
 
 void Ui::sendAck(uint16_t dst, uint32_t refMsgId) {

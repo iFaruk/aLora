@@ -19,6 +19,11 @@ public:
   bool sendDm(uint16_t dst, const WireChatPacket& pkt);
   bool sendDiscovery(uint16_t target, uint32_t refMsgId);
 
+  // Airtime discipline helpers for the UI/status page.
+  uint32_t airtimeWindowUsedMs() const { return _airtimeUsedInWindow; }
+  uint32_t airtimeWindowBudgetMs() const { return kAirtimeBudgetMs; }
+  uint32_t msUntilAirtimeReset(uint32_t nowMs) const;
+
   uint16_t localAddress() const;
 
   uint32_t rxCount() const { return _rxCount; }
@@ -39,4 +44,11 @@ private:
   RxCallback _rxCb = nullptr;
   mutable DedupeCache _dedupe;
   uint32_t _msgSeq = 1;
+
+  static constexpr uint32_t kAirtimeBudgetMs = 1400;   // per rolling window
+  static constexpr uint32_t kAirtimeWindowMs = 60000;  // window duration
+  uint32_t _airtimeWindowStartMs = 0;
+  uint32_t _airtimeUsedInWindow = 0;
+
+  bool reserveAirtime(size_t payloadBytes, bool critical);
 };

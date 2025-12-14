@@ -89,6 +89,8 @@ bool MeshRadio::sendDiscovery(uint16_t target, uint32_t refMsgId) {
 
   // Broadcast to refresh paths while keeping the intended destination in the packet.
   const uint16_t kBroadcastAddr = 0xFFFF;
+  if (!reserveAirtime(sizeof(WireChatPacket), false)) return false;
+
   radio.sendReliable(kBroadcastAddr, &probe, 1);
   _txCount++;
   _txAirtimeMs += estimateTimeOnAirMs(sizeof(WireChatPacket));
@@ -187,6 +189,9 @@ bool MeshRadio::sendDm(uint16_t dst, const WireChatPacket& pkt) {
   if (tmp.msgId == 0) tmp.msgId = ++_msgSeq;
   if (tmp.from == 0) tmp.from = localAddress();
   if (tmp.textLen == 0) tmp.textLen = (uint16_t)strnlen(tmp.text, sizeof(tmp.text));
+  const bool critical = tmp.kind == PacketKind::Ack || tmp.kind == PacketKind::PairAccept;
+  if (!reserveAirtime(sizeof(WireChatPacket), critical)) return false;
+
   radio.sendReliable(dst, &tmp, 1);
 
   _txCount++;
@@ -221,4 +226,31 @@ uint32_t MeshRadio::estimateTimeOnAirMs(size_t payloadBytes) const {
 
   uint32_t totalMs = (uint32_t)(tPayloadMs + tPreambleMs);
   return totalMs > 0 ? totalMs : 1;
+}
+
+bool MeshRadio::reserveAirtime(size_t payloadBytes, bool critical) {
+  uint32_t now = millis();
+  if (_airtimeWindowStartMs == 0 || (now - _airtimeWindowStartMs) > kAirtimeWindowMs) {
+    _airtimeWindowStartMs = now;
+    _airtimeUsedInWindow = 0;
+  }
+
+  uint32_t need = estimateTimeOnAirMs(payloadBytes);
+  if (!critical && (_airtimeUsedInWindow + need > kAirtimeBudgetMs)) {
+    return false;
+  }
+
+  if (_airtimeUsedInWindow + need > kAirtimeBudgetMs) {
+    _airtimeUsedInWindow = kAirtimeBudgetMs;
+  } else {
+    _airtimeUsedInWindow += need;
+  }
+  return true;
+}
+
+uint32_t MeshRadio::msUntilAirtimeReset(uint32_t nowMs) const {
+  if (_airtimeWindowStartMs == 0) return 0;
+  uint32_t elapsed = nowMs - _airtimeWindowStartMs;
+  if (elapsed >= kAirtimeWindowMs) return 0;
+  return kAirtimeWindowMs - elapsed;
 }

@@ -86,9 +86,9 @@ private:
   void sendPairRequest(uint16_t dst);
   void sendPairAccept(uint16_t dst, const WireChatPacket& req, uint32_t acceptNonce);
   void notePairing(uint16_t peer, const char* msg);
-  void recordPending(const WireChatPacket& pkt);
+  void recordPending(const WireChatPacket& pkt, uint8_t initialAttempts, uint32_t firstDelayMs);
   void updateReliability();
-  void escalateDiscovery(PendingSend& slot, uint32_t now);
+  bool escalateDiscovery(PendingSend& slot, uint32_t now);
   void clearPending(uint32_t msgId);
   uint32_t computeRetryDelayMs(uint8_t attempt) const;
   size_t pendingCount() const;
@@ -119,4 +119,20 @@ private:
   bool contactAt(size_t idx, SeenPeer& out) const;  // idx=0 is "All"
   bool matchesChatFilter(const ChatMsg& m) const;
   size_t filteredChatCount() const;
+
+  struct RouteHealth {
+    bool active = false;
+    uint16_t dst = 0;
+    uint8_t successStreak = 0;
+    uint32_t lastAckMs = 0;
+    uint32_t lastDiscoveryMs = 0;
+  };
+
+  static constexpr size_t kMaxRoutes = 6;
+  RouteHealth _routes[kMaxRoutes]{};
+
+  void noteDeliverySuccess(uint16_t dst);
+  bool routeIsStale(uint16_t dst, uint32_t now) const;
+  RouteHealth* routeFor(uint16_t dst);
+  const RouteHealth* routeFor(uint16_t dst) const;
 };

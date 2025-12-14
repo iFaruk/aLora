@@ -1,6 +1,6 @@
 # aLora — Private, Infrastructure-Independent Messaging over LoRa Mesh
 
-> **Status:** Milestone 3 complete — rotary text entry now has grouped jumps and quick shortcuts, chat history can be filtered per contact, and a contacts roster tracks paired + recently seen peers for instant addressing.
+> **Status:** Milestone 3 hardened — rotary text entry and contact roster are live, pairing keys now persist in NVS, airtime/routing discipline reduces on-air collisions, and the interoperability contract is documented below.
 
 ## AI authoring note
 
@@ -119,14 +119,25 @@ This repository is in a **prototype stabilization phase**. Latest highlights:
 * The **Status page** surfaces TX/RX counters, accumulated airtime, and pending queue depth for on-device health checks.
 * **Milestone 2 security:** devices **broadcast presence**, automatically **pair on request/accept**, derive **shared AES-256 keys** from deterministic nonces, and encrypt DM payloads with **AES-256-CTR** plus replay protection.
 * **Milestone 3 usability:** rotary text entry has **group jumps + reusable shortcuts**, chat history can be **filtered by contact**, and a **contacts roster** tracks paired + recently seen peers for instant addressing.
+* **Persistence + discipline:** pairing keys/replay windows persist in NVS, airtime is bucketed per minute to avoid overruns, stale routes trigger discovery before retries, and the interoperability contract below locks down on-air expectations.
 
 ## Known gaps / next steps
 
-* **Key persistence + contact UI:** keys are in-RAM for now; persist securely and expose a pair list in the UI.
+* **Contact UI polish:** persisted pairings now survive reboot; next step is richer on-device management.
 * **Wi-Fi presence option:** only LoRa presence beacons are emitted today.
-* **Routing-aware behavior:** track successful paths and prefer them; fall back to controlled discovery.
-* **Airtime discipline:** accurate time-on-air estimates, rate limiting, jitter/backoff.
-* **Interoperability contract:** stable on-air format so different devices/brands running aLora can relay consistently.
+* **Routing analytics:** success streaks are tracked; path scoring/visualization can be deepened.
+
+## Interoperability contract (compatibility agreement)
+
+These rules keep mixed aLora nodes interoperable on-air and avoid self-inflicted congestion:
+
+* **Packet format (stable):** `WireChatPacket` fields are fixed-width and little-endian: `kind (uint8)`, `msgId (uint32)`, `to/from (uint16 each)`, `ts (uint32)`, `refMsgId (uint32)`, `nonce (uint32)`, `textLen (uint16)`, `reserved (uint16)`, `text[80]`.
+* **Kinds:** `Chat=0`, `Ack=1`, `Discovery=2`, `Presence=3`, `PairRequest=4`, `PairAccept=5`, `SecureChat=6`. Unknown kinds are coerced to `Chat` before TX to keep relays happy.
+* **Deduplication:** every node drops duplicates by `(src, msgId)` and still emits an ACK for deduped Chat/SecureChat so the originator stops retrying.
+* **Reliability:** bounded unicast retries (up to 3) followed by a single broadcast `Discovery` probe; total attempts capped at 5 with jittered backoff.
+* **Airtime discipline:** transmissions reserve airtime from a **1.4 s per 60 s** bucket; non-critical packets defer if the bucket is empty, while ACK/PairAccept can bypass to keep delivery/state consistent.
+* **Route freshness:** if no ACK/discovery is seen for **45 s** for a destination, discovery is triggered before more retries to refresh the path.
+* **Security state:** pairing keys and last-seen message IDs persist in ESP32 NVS to survive reboot; SecureChat uses AES-256-CTR with deterministic nonces derived from `(src, dst, nonce, msgId)`.
 
 ## Configuration philosophy
 
