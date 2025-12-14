@@ -18,8 +18,15 @@ public:
   void onIncoming(uint16_t src, const WireChatPacket& pkt);
 
 private:
-  enum class Screen : uint8_t { Chat=0, Compose=1, Status=2, Settings=3 };
-  enum class ComposeFocus : uint8_t { Destination=0, Cursor=1, Character=2, Send=3 };
+  enum class Screen : uint8_t { Chat=0, Contacts=1, Compose=2, Status=3, Settings=4 };
+  enum class ComposeFocus : uint8_t {
+    Destination=0,
+    Contact=1,
+    Cursor=2,
+    Character=3,
+    Shortcut=4,
+    Send=5
+  };
 
   IDisplay* _d = nullptr;
   RotaryInput* _in = nullptr;
@@ -53,9 +60,12 @@ private:
   uint8_t _cursor = 0;
   uint8_t _charIndex = 0;
   ComposeFocus _focus = ComposeFocus::Destination;
+  uint8_t _contactSelection = 0;
+  uint8_t _shortcutIdx = 0;
   uint32_t _nextMsgId = 1;
 
   void drawChat();
+  void drawContacts();
   void drawCompose();
   void drawStatus();
   void drawSettings();
@@ -69,6 +79,8 @@ private:
   void handleComposeDelta(int32_t delta);
   void advanceCursor(int32_t delta);
   void syncCharIndexToDraft();
+  void applyShortcut();
+  void selectContactTarget();
   void sendDraft();
   void sendSecureDraft();
   void sendPairRequest(uint16_t dst);
@@ -88,4 +100,23 @@ private:
   bool decryptSecureText(uint16_t src, const WireChatPacket& pkt, char* outText, size_t outLen);
   bool ensurePairedOrRequest(uint16_t dst);
   uint32_t nextNonce() const;
+
+  struct SeenPeer {
+    bool active = false;
+    uint16_t addr = 0;
+    uint32_t lastSeenSec = 0;
+    bool paired = false;
+  };
+
+  static constexpr size_t kMaxSeenPeers = 8;
+  SeenPeer _seen[kMaxSeenPeers]{};
+  uint16_t _chatPeerFilter = 0;  // 0 = all
+  uint8_t _contactScroll = 0;
+
+  void recordSeenPeer(uint16_t addr, bool paired);
+  size_t contactCount() const;
+  size_t contactListLength() const;
+  bool contactAt(size_t idx, SeenPeer& out) const;  // idx=0 is "All"
+  bool matchesChatFilter(const ChatMsg& m) const;
+  size_t filteredChatCount() const;
 };

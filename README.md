@@ -1,6 +1,6 @@
 # aLora — Private, Infrastructure-Independent Messaging over LoRa Mesh
 
-> **Status:** Milestone 2 complete — devices now broadcast presence, complete a deterministic pairing handshake, derive shared session keys, and encrypt DM payloads with AES-256-CTR while preserving delivery receipts and replay protection.
+> **Status:** Milestone 3 complete — rotary text entry now has grouped jumps and quick shortcuts, chat history can be filtered per contact, and a contacts roster tracks paired + recently seen peers for instant addressing.
 
 ## AI authoring note
 
@@ -118,6 +118,7 @@ This repository is in a **prototype stabilization phase**. Latest highlights:
 * **Reliability escalation** now performs a controlled broadcast discovery probe after failed unicasts, then resumes bounded retries.
 * The **Status page** surfaces TX/RX counters, accumulated airtime, and pending queue depth for on-device health checks.
 * **Milestone 2 security:** devices **broadcast presence**, automatically **pair on request/accept**, derive **shared AES-256 keys** from deterministic nonces, and encrypt DM payloads with **AES-256-CTR** plus replay protection.
+* **Milestone 3 usability:** rotary text entry has **group jumps + reusable shortcuts**, chat history can be **filtered by contact**, and a **contacts roster** tracks paired + recently seen peers for instant addressing.
 
 ## Known gaps / next steps
 
@@ -177,9 +178,9 @@ This keeps the firmware lightweight while remaining adaptable.
 
 **Goal:** composing messages on-device is fast and comfortable.
 
-* [ ] Improved rotary text entry (groups, shortcuts, word suggestions).
-* [ ] Better chat history browsing.
-* [ ] Contact list + recently seen devices.
+* [x] Improved rotary text entry (group jumps plus reusable shortcuts).
+* [x] Better chat history browsing with per-contact filtering.
+* [x] Contact list + recently seen devices surfaced in UI.
 
 ### Milestone 4 — Voice memos (optional)
 
