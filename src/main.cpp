@@ -3,6 +3,7 @@
 #include "config/AppBuildConfig.h"
 #include "net/MeshRadio.h"
 #include "storage/ChatLog.h"
+#include "storage/Pairing.h"
 #include "input/Rotary.h"
 #include "ui/Ui.h"
 
@@ -14,16 +15,17 @@
 
 static MeshRadio g_radio;
 static ChatLog g_log;
+static PairingStore g_pairs;
 static RotaryInput g_rotary;
 
 #if defined(APP_DISPLAY_OLED)
   static DisplayOledU8g2 g_display;
-  static Ui g_ui(&g_display, &g_rotary, &g_radio, &g_log);
+  static Ui g_ui(&g_display, &g_rotary, &g_radio, &g_log, &g_pairs);
 #elif defined(APP_DISPLAY_TFT)
   static DisplayTftStub g_display;
-  static Ui g_ui(&g_display, &g_rotary, &g_radio, &g_log);
+  static Ui g_ui(&g_display, &g_rotary, &g_radio, &g_log, &g_pairs);
 #else
-  static Ui g_ui(nullptr, &g_rotary, &g_radio, &g_log);
+  static Ui g_ui(nullptr, &g_rotary, &g_radio, &g_log, &g_pairs);
 #endif
 
 static void onRadioRx(uint16_t src, const WireChatPacket& pkt, int16_t rssi, float snr) {
@@ -47,6 +49,8 @@ void setup() {
 
   g_radio.setRxCallback(onRadioRx);
   g_radio.begin();
+
+  g_pairs.setLocalAddress(g_radio.localAddress());
 
   g_ui.begin();
 

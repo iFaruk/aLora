@@ -1,6 +1,6 @@
 # aLora — Private, Infrastructure-Independent Messaging over LoRa Mesh
 
-> **Status:** Milestone 1 complete — DM retries are bounded with jitter, failed sends escalate to a controlled broadcast discovery probe, and the OLED status page now surfaces airtime/pending metrics for on-device health checks. Core security work continues.
+> **Status:** Milestone 2 complete — devices now broadcast presence, complete a deterministic pairing handshake, derive shared session keys, and encrypt DM payloads with AES-256-CTR while preserving delivery receipts and replay protection.
 
 ## AI authoring note
 
@@ -117,12 +117,12 @@ This repository is in a **prototype stabilization phase**. Latest highlights:
 * Basic message persistence (chat tail/history concept).
 * **Reliability escalation** now performs a controlled broadcast discovery probe after failed unicasts, then resumes bounded retries.
 * The **Status page** surfaces TX/RX counters, accumulated airtime, and pending queue depth for on-device health checks.
+* **Milestone 2 security:** devices **broadcast presence**, automatically **pair on request/accept**, derive **shared AES-256 keys** from deterministic nonces, and encrypt DM payloads with **AES-256-CTR** plus replay protection.
 
 ## Known gaps / next steps
 
-* **Reliable delivery + receipts:** strict double-tick semantics and failure escalation (bounded auto-retries and duplicate ACKs are now in place).
-* **Pairing protocol:** advertisement, request/accept UX, and secure key establishment.
-* **AES-256 E2E:** encryption of DM payloads, key storage, replay protection.
+* **Key persistence + contact UI:** keys are in-RAM for now; persist securely and expose a pair list in the UI.
+* **Wi-Fi presence option:** only LoRa presence beacons are emitted today.
 * **Routing-aware behavior:** track successful paths and prefer them; fall back to controlled discovery.
 * **Airtime discipline:** accurate time-on-air estimates, rate limiting, jitter/backoff.
 * **Interoperability contract:** stable on-air format so different devices/brands running aLora can relay consistently.
@@ -167,11 +167,11 @@ This keeps the firmware lightweight while remaining adaptable.
 
 **Goal:** private DMs are secure and user-controlled.
 
-* [ ] Presence broadcast (LoRa and/or Wi-Fi).
-* [ ] Pair request/accept workflow in UI.
-* [ ] Key derivation and secure storage.
-* [ ] AES-256 encryption for DM payloads.
-* [ ] Replay protection + message authenticity.
+* [x] Presence broadcast (LoRa and/or Wi-Fi).
+* [x] Pair request/accept workflow in UI.
+* [x] Key derivation and secure storage.
+* [x] AES-256 encryption for DM payloads.
+* [x] Replay protection + message authenticity.
 
 ### Milestone 3 — Usability upgrades
 

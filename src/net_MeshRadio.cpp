@@ -4,6 +4,7 @@
 #include <math.h>
 #include <SPI.h>
 #include <LoraMesher.h>
+#include <cstring>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -62,6 +63,9 @@ void MeshRadio::sendAck(uint16_t dst, uint32_t refMsgId) {
   ack.from = localAddress();
   ack.ts = (uint32_t)(millis() / 1000);
   ack.refMsgId = refMsgId;
+  ack.nonce = 0;
+  ack.textLen = 0;
+  ack.reserved = 0;
   ack.text[0] = '\0';
   sendDm(dst, ack);
 }
@@ -78,6 +82,9 @@ bool MeshRadio::sendDiscovery(uint16_t target, uint32_t refMsgId) {
   probe.from = localAddress();
   probe.ts = (uint32_t)(millis() / 1000);
   probe.refMsgId = 0;
+  probe.nonce = 0;
+  probe.textLen = 0;
+  probe.reserved = 0;
   probe.text[0] = '\0';
 
   // Broadcast to refresh paths while keeping the intended destination in the packet.
@@ -163,12 +170,23 @@ bool MeshRadio::sendDm(uint16_t dst, const WireChatPacket& pkt) {
 
   // Avoid template instantiation with T=void by passing a typed pointer.
   WireChatPacket tmp = pkt;
-  if (tmp.kind != PacketKind::Ack && tmp.kind != PacketKind::Chat && tmp.kind != PacketKind::Discovery) {
-    tmp.kind = PacketKind::Chat;
+  switch (tmp.kind) {
+    case PacketKind::Ack:
+    case PacketKind::Chat:
+    case PacketKind::Discovery:
+    case PacketKind::Presence:
+    case PacketKind::PairRequest:
+    case PacketKind::PairAccept:
+    case PacketKind::SecureChat:
+      break;
+    default:
+      tmp.kind = PacketKind::Chat;
+      break;
   }
   tmp.to = dst;
   if (tmp.msgId == 0) tmp.msgId = ++_msgSeq;
   if (tmp.from == 0) tmp.from = localAddress();
+  if (tmp.textLen == 0) tmp.textLen = (uint16_t)strnlen(tmp.text, sizeof(tmp.text));
   radio.sendReliable(dst, &tmp, 1);
 
   _txCount++;

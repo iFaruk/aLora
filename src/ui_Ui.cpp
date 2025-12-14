@@ -2,11 +2,12 @@
 #include <cstring>
 #include "config/AppBuildConfig.h"
 #include "ui/Ui.h"
+#include "util/Crypto.h"
 
 static const char* kCharset = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?-_/@";
 
-Ui::Ui(IDisplay* display, RotaryInput* input, MeshRadio* radio, ChatLog* log)
-: _d(display), _in(input), _radio(radio), _log(log) {}
+Ui::Ui(IDisplay* display, RotaryInput* input, MeshRadio* radio, ChatLog* log, PairingStore* pairs)
+: _d(display), _in(input), _radio(radio), _log(log), _pairs(pairs) {}
 
 void Ui::begin() {
   _lastDrawMs = 0;
@@ -17,19 +18,31 @@ void Ui::begin() {
 void Ui::onIncoming(uint16_t src, const WireChatPacket& pkt) {
   uint16_t me = _radio ? _radio->localAddress() : 0;
 
-  if (pkt.kind == PacketKind::Ack) {
-    if (pkt.to != me) return;
-    if (_log) _log->markDelivered(pkt.refMsgId);
-    clearPending(pkt.refMsgId);
-    return;
-  }
-
-  if (pkt.kind == PacketKind::Discovery) {
-    if (pkt.to != me && pkt.to != 0xFFFF) return;
-    if (_radio) {
-      sendAck(src, pkt.refMsgId);
-    }
-    return;
+  switch (pkt.kind) {
+    case PacketKind::Ack:
+      if (pkt.to != me) return;
+      if (_log) _log->markDelivered(pkt.refMsgId);
+      clearPending(pkt.refMsgId);
+      return;
+    case PacketKind::Discovery:
+      if (pkt.to != me && pkt.to != 0xFFFF) return;
+      if (_radio) sendAck(src, pkt.refMsgId);
+      return;
+    case PacketKind::Presence:
+      handlePresence(src, pkt);
+      return;
+    case PacketKind::PairRequest:
+      handlePairRequest(src, pkt);
+      return;
+    case PacketKind::PairAccept:
+      handlePairAccept(src, pkt);
+      return;
+    case PacketKind::SecureChat:
+      handleSecureChat(src, pkt);
+      return;
+    case PacketKind::Chat:
+    default:
+      break;
   }
 
   if (pkt.to != me && pkt.to != 0xFFFF) return;
@@ -162,6 +175,16 @@ void Ui::syncCharIndexToDraft() {
 void Ui::sendDraft() {
   if (!_radio) return;
 
+  if (_pairs && _pairs->hasKey(_dst)) {
+    sendSecureDraft();
+    return;
+  }
+
+  if (!ensurePairedOrRequest(_dst)) {
+    notePairing(_dst, "Pairing requested; waiting for accept.");
+    return;
+  }
+
   WireChatPacket pkt{};
   pkt.kind = PacketKind::Chat;
   pkt.msgId = _nextMsgId++;
@@ -169,6 +192,9 @@ void Ui::sendDraft() {
   pkt.from = _radio->localAddress();
   pkt.ts = (uint32_t)(millis() / 1000);
   pkt.refMsgId = 0;
+  pkt.nonce = 0;
+  pkt.textLen = (uint16_t)std::strnlen(_draft, sizeof(pkt.text));
+  pkt.reserved = 0;
   std::strncpy(pkt.text, _draft, sizeof(pkt.text) - 1);
   pkt.text[sizeof(pkt.text) - 1] = '\0';
 
@@ -177,6 +203,58 @@ void Ui::sendDraft() {
 
   if (_log) {
     _log->add(_dst, true, pkt.msgId, pkt.text, pkt.ts);
+  }
+}
+
+void Ui::sendSecureDraft() {
+  if (!_radio || !_pairs) return;
+
+  uint8_t key[PairingStore::kKeyLen] = {0};
+  if (!_pairs->loadKey(_dst, key)) {
+    sendPairRequest(_dst);
+    notePairing(_dst, "Missing key; refreshed pairing request.");
+    return;
+  }
+
+  WireChatPacket pkt{};
+  pkt.kind = PacketKind::SecureChat;
+  pkt.msgId = _nextMsgId++;
+  pkt.to = _dst;
+  pkt.from = _radio->localAddress();
+  pkt.ts = (uint32_t)(millis() / 1000);
+  pkt.refMsgId = 0;
+  pkt.nonce = nextNonce();
+  pkt.reserved = 0;
+
+  size_t plainLen = std::strnlen(_draft, sizeof(pkt.text));
+  if (plainLen > sizeof(pkt.text)) plainLen = sizeof(pkt.text);
+  pkt.textLen = (uint16_t)plainLen;
+
+  uint8_t cipher[sizeof(pkt.text)] = {0};
+  bool ok = crypto::aes256_ctr_transform(
+    key,
+    _radio->localAddress(),
+    _dst,
+    pkt.nonce,
+    pkt.msgId,
+    reinterpret_cast<const uint8_t*>(_draft),
+    plainLen,
+    cipher
+  );
+
+  if (!ok) {
+    notePairing(_dst, "Encryption failed; message not sent.");
+    return;
+  }
+
+  memcpy(pkt.text, cipher, plainLen);
+  if (plainLen < sizeof(pkt.text)) pkt.text[plainLen] = '\0';
+
+  _radio->sendDm(_dst, pkt);
+  recordPending(pkt);
+
+  if (_log) {
+    _log->add(_dst, true, pkt.msgId, _draft, pkt.ts);
   }
 }
 
@@ -203,6 +281,103 @@ void Ui::clearPending(uint32_t msgId) {
     slot.active = false;
     return;
   }
+}
+
+void Ui::maybeBroadcastPresence(uint32_t now) {
+  if (!_radio) return;
+
+  const uint32_t intervalMs = 30000;
+  if (_lastPresenceMs != 0 && (now - _lastPresenceMs) < intervalMs) return;
+  _lastPresenceMs = now;
+
+  WireChatPacket pkt{};
+  pkt.kind = PacketKind::Presence;
+  pkt.msgId = _nextMsgId++;
+  pkt.to = 0xFFFF;
+  pkt.from = _radio->localAddress();
+  pkt.ts = now / 1000;
+  pkt.refMsgId = 0;
+  pkt.nonce = nextNonce();
+  std::strncpy(pkt.text, "aLora presence", sizeof(pkt.text) - 1);
+  pkt.textLen = (uint16_t)std::strnlen(pkt.text, sizeof(pkt.text));
+  pkt.reserved = 0;
+
+  _radio->sendDm(pkt.to, pkt);
+}
+
+void Ui::handlePresence(uint16_t src, const WireChatPacket& pkt) {
+  uint16_t me = _radio ? _radio->localAddress() : 0;
+  if (pkt.to != 0xFFFF && pkt.to != me) return;
+  notePairing(src, "Presence seen.");
+}
+
+void Ui::handlePairRequest(uint16_t src, const WireChatPacket& pkt) {
+  uint16_t me = _radio ? _radio->localAddress() : 0;
+  if (pkt.to != me && pkt.to != 0xFFFF) return;
+  if (!_pairs) return;
+
+  uint8_t key[PairingStore::kKeyLen] = {0};
+  uint32_t acceptNonce = nextNonce();
+  if (_pairs->deriveFromRequest(src, pkt.msgId, pkt.nonce, acceptNonce, key)) {
+    notePairing(src, "Paired via incoming request.");
+  }
+  sendPairAccept(src, pkt, acceptNonce);
+}
+
+void Ui::handlePairAccept(uint16_t src, const WireChatPacket& pkt) {
+  uint16_t me = _radio ? _radio->localAddress() : 0;
+  if (pkt.to != me && pkt.to != 0xFFFF) return;
+  if (!_pairs) return;
+
+  uint8_t key[PairingStore::kKeyLen] = {0};
+  if (_pairs->resolvePendingRequest(src, pkt.refMsgId, pkt.nonce, key)) {
+    notePairing(src, "Pairing accepted.");
+  }
+}
+
+void Ui::handleSecureChat(uint16_t src, const WireChatPacket& pkt) {
+  uint16_t me = _radio ? _radio->localAddress() : 0;
+  if (pkt.to != me) return;
+  if (!_pairs) return;
+
+  if (!_pairs->hasKey(src)) {
+    sendPairRequest(src);
+    notePairing(src, "Secure packet seen without key; re-requesting pair.");
+    return;
+  }
+
+  if (!_pairs->checkReplayAndUpdate(src, pkt.msgId)) return;
+
+  char plain[sizeof(pkt.text) + 1] = {0};
+  if (!decryptSecureText(src, pkt, plain, sizeof(plain))) return;
+
+  if (_log) _log->add(src, false, pkt.msgId, plain, (uint32_t)(millis()/1000));
+  if (_radio) sendAck(src, pkt.msgId);
+}
+
+bool Ui::decryptSecureText(uint16_t src, const WireChatPacket& pkt, char* outText, size_t outLen) {
+  if (!_pairs || !_radio) return false;
+  uint8_t key[PairingStore::kKeyLen] = {0};
+  if (!_pairs->loadKey(src, key)) return false;
+
+  size_t len = pkt.textLen;
+  if (len > sizeof(pkt.text)) len = sizeof(pkt.text);
+  if (len >= outLen) len = outLen - 1;
+
+  bool ok = crypto::aes256_ctr_transform(
+    key,
+    _radio->localAddress(),
+    src,
+    pkt.nonce,
+    pkt.msgId,
+    reinterpret_cast<const uint8_t*>(pkt.text),
+    len,
+    reinterpret_cast<uint8_t*>(outText)
+  );
+
+  if (!ok) return false;
+  outText[len] = '\0';
+  return true;
 }
 
 void Ui::updateReliability() {
@@ -257,6 +432,62 @@ uint32_t Ui::computeRetryDelayMs(uint8_t attempt) const {
   return (baseDelayMs * (uint32_t)attempt) + jitter;
 }
 
+void Ui::sendPairRequest(uint16_t dst) {
+  if (!_radio || !_pairs) return;
+
+  WireChatPacket pkt{};
+  pkt.kind = PacketKind::PairRequest;
+  pkt.msgId = _nextMsgId++;
+  pkt.to = dst;
+  pkt.from = _radio->localAddress();
+  pkt.ts = (uint32_t)(millis() / 1000);
+  pkt.refMsgId = 0;
+  pkt.nonce = nextNonce();
+  pkt.textLen = 0;
+  pkt.reserved = 0;
+  std::strncpy(pkt.text, "PAIR_REQ", sizeof(pkt.text) - 1);
+
+  _radio->sendDm(dst, pkt);
+  _pairs->recordOutgoingRequest(dst, pkt.msgId, pkt.nonce);
+  notePairing(dst, "Sent pairing request.");
+}
+
+void Ui::sendPairAccept(uint16_t dst, const WireChatPacket& req, uint32_t acceptNonce) {
+  if (!_radio || !_pairs) return;
+  WireChatPacket pkt{};
+  pkt.kind = PacketKind::PairAccept;
+  pkt.msgId = _nextMsgId++;
+  pkt.to = dst;
+  pkt.from = _radio->localAddress();
+  pkt.ts = (uint32_t)(millis() / 1000);
+  pkt.refMsgId = req.msgId;
+  pkt.nonce = acceptNonce;
+  pkt.textLen = 0;
+  pkt.reserved = 0;
+  std::strncpy(pkt.text, "PAIR_ACCEPT", sizeof(pkt.text) - 1);
+
+  _radio->sendDm(dst, pkt);
+}
+
+void Ui::notePairing(uint16_t peer, const char* msg) {
+  if (!_log) return;
+  _log->add(peer, false, 0, msg, (uint32_t)(millis()/1000));
+}
+
+bool Ui::ensurePairedOrRequest(uint16_t dst) {
+  if (!_pairs) return true;
+  if (_pairs->hasKey(dst)) return true;
+  sendPairRequest(dst);
+  return false;
+}
+
+uint32_t Ui::nextNonce() const {
+  uint32_t seed = (uint32_t)millis();
+  seed ^= ((uint32_t)_nextMsgId << 1);
+  if (_radio) seed ^= ((uint32_t)_radio->localAddress() << 16);
+  return seed ^ 0xA5A5BEEF;
+}
+
 void Ui::sendAck(uint16_t dst, uint32_t refMsgId) {
   WireChatPacket ack{};
   ack.kind = PacketKind::Ack;
@@ -265,6 +496,9 @@ void Ui::sendAck(uint16_t dst, uint32_t refMsgId) {
   ack.from = _radio->localAddress();
   ack.ts = (uint32_t)(millis() / 1000);
   ack.refMsgId = refMsgId;
+  ack.nonce = 0;
+  ack.textLen = 0;
+  ack.reserved = 0;
   ack.text[0] = '\0';
   _radio->sendDm(dst, ack);
 }
@@ -275,6 +509,7 @@ void Ui::tick() {
 
   // Draw at ~10 FPS
   uint32_t now = millis();
+  maybeBroadcastPresence(now);
   if (now - _lastDrawMs < 100) return;
   _lastDrawMs = now;
 
