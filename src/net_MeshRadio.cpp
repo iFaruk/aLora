@@ -9,8 +9,12 @@
 
 static TaskHandle_t g_receiveTaskHandle = nullptr;
 
-static void processReceivedPackets(void* pv) {
+void MeshRadio::receiveTask(void* pv) {
   MeshRadio* self = reinterpret_cast<MeshRadio*>(pv);
+  self->processReceivedPackets();
+}
+
+void MeshRadio::processReceivedPackets() {
   LoraMesher& radio = LoraMesher::getInstance();
 
   for (;;) {
@@ -29,9 +33,9 @@ static void processReceivedPackets(void* pv) {
       WireChatPacket pkt = *(p->payload);
       uint16_t src = p->src;
 
-      self->_rxCount++;
+      _rxCount++;
 
-      if (self->_rxCb) self->_rxCb(src, pkt, rssi, snr);
+      if (_rxCb) _rxCb(src, pkt, rssi, snr);
 
       // IMPORTANT: always delete packets to prevent memory leaks.
       radio.deletePacket(p);
@@ -83,7 +87,7 @@ bool MeshRadio::begin() {
   // Create and register receive task for app packets
   if (!g_receiveTaskHandle) {
     BaseType_t res = xTaskCreate(
-      processReceivedPackets,
+      MeshRadio::receiveTask,
       "LoRaDM_RX",
       4096,
       this,
@@ -109,7 +113,7 @@ bool MeshRadio::sendDm(uint16_t dst, const WireChatPacket& pkt) {
   LoraMesher& radio = LoraMesher::getInstance();
 
   // Reliable send: LoRaMesher will route and retry as needed.
-  radio.sendReliable(dst, (void*)&pkt, 1);
+  radio.sendReliable<WireChatPacket>(dst, const_cast<WireChatPacket*>(&pkt), 1);
   _txCount++;
   return true;
 }
