@@ -1,6 +1,6 @@
 # aLora — Private, Infrastructure-Independent Messaging over LoRa Mesh
 
-> **Status:** Early prototype, now with interactive compose/send, on-device deduplication, and OLED bring-up hardening. Core reliability and security work continues.
+> **Status:** Early prototype, now with interactive compose/send, on-device deduplication, OLED bring-up hardening, and bounded DM resend + duplicate ACK handling for better reliability. Core security work continues.
 
 ## AI authoring note
 
@@ -113,12 +113,12 @@ This repository is in a **prototype stabilization phase**. Latest highlights:
 * Rotary input integrated for menu navigation and text editing.
 * Compose view can now **set destination, move the cursor, edit characters, and send** DMs directly over the mesh.
 * Incoming packets are **deduplicated on-device** before reaching the UI/log.
-* One-hop delivery receipts are **acknowledged and reflected in the chat list** (checkmark when delivered).
+* One-hop delivery receipts are **acknowledged and reflected in the chat list** (checkmark when delivered), and outgoing DMs auto-retry with bounded resends if no receipt arrives.
 * Basic message persistence (chat tail/history concept).
 
 ## Known gaps / next steps
 
-* **Reliable delivery + receipts:** strict double-tick semantics, retry logic, and failure escalation (basic one-hop ACKs are in place; retries are pending).
+* **Reliable delivery + receipts:** strict double-tick semantics and failure escalation (bounded auto-retries and duplicate ACKs are now in place).
 * **Pairing protocol:** advertisement, request/accept UX, and secure key establishment.
 * **AES-256 E2E:** encryption of DM payloads, key storage, replay protection.
 * **Routing-aware behavior:** track successful paths and prefer them; fall back to controlled discovery.
@@ -156,8 +156,8 @@ This keeps the firmware lightweight while remaining adaptable.
 
 **Goal:** DM messaging feels dependable.
 
-* [ ] Delivery receipts (ACK) with strict semantics.
-* [ ] Retry policy (bounded, airtime-aware).
+* [x] Delivery receipts (ACK) with bounded retries.
+* [ ] Retry policy (bounded, airtime-aware and jittered).
 * [ ] Failure escalation: broadcast discovery only when necessary.
 * [ ] Status page: airtime + health metrics.
 

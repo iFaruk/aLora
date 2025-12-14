@@ -17,6 +17,7 @@ void Ui::begin() {
 void Ui::onIncoming(uint16_t src, const WireChatPacket& pkt) {
   if (pkt.kind == PacketKind::Ack) {
     if (_log) _log->markDelivered(pkt.refMsgId);
+    clearPending(pkt.refMsgId);
     return;
   }
 
@@ -159,9 +160,57 @@ void Ui::sendDraft() {
   pkt.text[sizeof(pkt.text) - 1] = '\0';
 
   _radio->sendDm(_dst, pkt);
+  recordPending(pkt);
 
   if (_log) {
     _log->add(_dst, true, pkt.msgId, pkt.text, pkt.ts);
+  }
+}
+
+void Ui::recordPending(const WireChatPacket& pkt) {
+  for (size_t i = 0; i < kMaxPending; i++) {
+    PendingSend& slot = _pending[i];
+    if (slot.active) continue;
+    slot.active = true;
+    slot.dst = pkt.to;
+    slot.attempts = 1;
+    slot.lastSendMs = millis();
+    slot.pkt = pkt;
+    return;
+  }
+}
+
+void Ui::clearPending(uint32_t msgId) {
+  for (size_t i = 0; i < kMaxPending; i++) {
+    PendingSend& slot = _pending[i];
+    if (!slot.active) continue;
+    if (slot.pkt.msgId != msgId) continue;
+    slot.active = false;
+    return;
+  }
+}
+
+void Ui::updateReliability() {
+  if (!_radio) return;
+
+  const uint32_t now = millis();
+  const uint32_t retryDelayMs = 4000;
+  const uint8_t maxAttempts = 3;
+
+  for (size_t i = 0; i < kMaxPending; i++) {
+    PendingSend& slot = _pending[i];
+    if (!slot.active) continue;
+
+    if (slot.attempts >= maxAttempts) {
+      slot.active = false;
+      continue;
+    }
+
+    if (now - slot.lastSendMs < retryDelayMs) continue;
+
+    _radio->sendDm(slot.dst, slot.pkt);
+    slot.attempts++;
+    slot.lastSendMs = now;
   }
 }
 
@@ -179,6 +228,7 @@ void Ui::sendAck(uint16_t dst, uint32_t refMsgId) {
 
 void Ui::tick() {
   handleInput();
+  updateReliability();
 
   // Draw at ~10 FPS
   uint32_t now = millis();

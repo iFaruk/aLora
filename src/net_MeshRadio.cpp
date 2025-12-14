@@ -43,11 +43,26 @@ void MeshRadio::processReceivedPackets(void* pv) {
 
 void MeshRadio::onRxPacket(uint16_t src, const WireChatPacket& pkt, int16_t rssi, float snr) {
   if (_dedupe.seen(src, pkt.msgId)) {
+    if (pkt.kind == PacketKind::Chat) {
+      sendAck(src, pkt.msgId);
+    }
     return;
   }
 
   _dedupe.remember(src, pkt.msgId);
   if (_rxCb) _rxCb(src, pkt, rssi, snr);
+}
+
+void MeshRadio::sendAck(uint16_t dst, uint32_t refMsgId) {
+  WireChatPacket ack{};
+  ack.kind = PacketKind::Ack;
+  ack.msgId = 0;  // sendDm will assign if zero
+  ack.to = dst;
+  ack.from = localAddress();
+  ack.ts = (uint32_t)(millis() / 1000);
+  ack.refMsgId = refMsgId;
+  ack.text[0] = '\0';
+  sendDm(dst, ack);
 }
 
 bool MeshRadio::begin() {
