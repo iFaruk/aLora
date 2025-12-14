@@ -50,6 +50,7 @@ void setup() {
   g_radio.setRxCallback(onRadioRx);
   g_radio.begin();
 
+  g_pairs.begin();
   g_pairs.setLocalAddress(g_radio.localAddress());
 
   g_ui.begin();

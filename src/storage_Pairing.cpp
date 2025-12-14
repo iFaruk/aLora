@@ -1,6 +1,24 @@
 #include "storage/Pairing.h"
 
+#include <Arduino.h>
 #include <string.h>
+
+namespace {
+struct PersistedPairEntry {
+  uint8_t inUse;
+  uint16_t peer;
+  uint32_t lastMsgId;
+  uint8_t key[PairingStore::kKeyLen];
+};
+}
+
+bool PairingStore::begin() {
+  if (_prefs.begin("alora_pair", false)) {
+    loadPersisted();
+    return true;
+  }
+  return false;
+}
 
 bool PairingStore::hasKey(uint16_t peer) const {
   for (size_t i = 0; i < kMaxPeers; i++) {
@@ -22,7 +40,7 @@ bool PairingStore::rememberKey(uint16_t peer, const uint8_t key[kKeyLen]) {
   for (size_t i = 0; i < kMaxPeers; i++) {
     if (_entries[i].inUse && _entries[i].peer == peer) {
       memcpy(_entries[i].key, key, kKeyLen);
-      return true;
+      return persistEntry(i);
     }
   }
 
@@ -33,7 +51,7 @@ bool PairingStore::rememberKey(uint16_t peer, const uint8_t key[kKeyLen]) {
   e.peer = peer;
   memcpy(e.key, key, kKeyLen);
   e.lastMsgId = 0;
-  return true;
+  return persistEntry(idx);
 }
 
 bool PairingStore::recordOutgoingRequest(uint16_t peer, uint32_t msgId, uint32_t nonce) {
@@ -85,7 +103,7 @@ bool PairingStore::checkReplayAndUpdate(uint16_t peer, uint32_t msgId) {
     if (!e.inUse || e.peer != peer) continue;
     if (msgId <= e.lastMsgId) return false;
     e.lastMsgId = msgId;
-    return true;
+    return persistEntry(i);
   }
   return false;
 }
@@ -121,5 +139,38 @@ void PairingStore::deriveKeyMaterial(uint16_t a, uint16_t b, uint32_t mixedNonce
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
     z = z ^ (z >> 31);
     memcpy(out + i, &z, 8);
+  }
+}
+
+bool PairingStore::persistEntry(size_t idx) {
+  if (idx >= kMaxPeers) return false;
+  PersistedPairEntry blob{};
+  blob.inUse = _entries[idx].inUse ? 1 : 0;
+  blob.peer = _entries[idx].peer;
+  blob.lastMsgId = _entries[idx].lastMsgId;
+  memcpy(blob.key, _entries[idx].key, kKeyLen);
+
+  char key[8];
+  snprintf(key, sizeof(key), "p%u", (unsigned)idx);
+
+  size_t written = _prefs.putBytes(key, &blob, sizeof(blob));
+  _lastPersistMs = (uint32_t)millis();
+  return written == sizeof(blob);
+}
+
+void PairingStore::loadPersisted() {
+  for (size_t i = 0; i < kMaxPeers; i++) {
+    char key[8];
+    snprintf(key, sizeof(key), "p%u", (unsigned)i);
+
+    PersistedPairEntry blob{};
+    size_t got = _prefs.getBytes(key, &blob, sizeof(blob));
+    if (got != sizeof(blob)) continue;
+    if (!blob.inUse) continue;
+
+    _entries[i].inUse = true;
+    _entries[i].peer = blob.peer;
+    _entries[i].lastMsgId = blob.lastMsgId;
+    memcpy(_entries[i].key, blob.key, kKeyLen);
   }
 }

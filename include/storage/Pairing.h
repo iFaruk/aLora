@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include <Preferences.h>
 
 // Lightweight in-memory pairing/key store for milestone 2.
 // Avoids dynamic allocation and keeps deterministic timing on the MCU.
@@ -8,6 +9,9 @@ class PairingStore {
 public:
   static constexpr size_t kMaxPeers = 6;
   static constexpr size_t kKeyLen = 32;
+
+  // Load persisted keys/nonces from NVS. Safe to call multiple times.
+  bool begin();
 
   void setLocalAddress(uint16_t addr) { _local = addr; }
 
@@ -43,8 +47,12 @@ private:
   PendingPairReq _pending[kMaxPeers];
 
   uint16_t _local = 0;
+  Preferences _prefs;
+  uint32_t _lastPersistMs = 0;
 
   bool findFreeSlot(size_t& idx);
   bool findPending(uint16_t peer, uint32_t msgId, size_t& idx) const;
   static void deriveKeyMaterial(uint16_t a, uint16_t b, uint32_t mixedNonce, uint8_t out[kKeyLen]);
+  bool persistEntry(size_t idx);
+  void loadPersisted();
 };
