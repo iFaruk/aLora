@@ -28,7 +28,7 @@ struct MeshPeer {
 class MeshManager {
 private:
     static MeshManager* instance;
-    LoRaMesher& radio;
+    LoraMesher& radio;
 
     // Local Identity
     uint16_t localId;
