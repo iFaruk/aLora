@@ -13,10 +13,17 @@ MeshManager::MeshManager() : radio(LoraMesher::getInstance()) {
     cryptoMutex = xSemaphoreCreateMutex();
 }
 
-void MeshManager::processReceivedPackets(void* pData) {
-    AppPacket<uint8_t>* packet = (AppPacket<uint8_t>*)pData;
-    if (instance) {
-        instance->processPacket(packet);
+void MeshManager::processReceivedPackets(void* parameters) {
+    for (;;) {
+        ulTaskNotifyTake(pdPASS, portMAX_DELAY);
+
+        if (instance) {
+            while (instance->radio.getReceivedQueueSize() > 0) {
+                AppPacket<uint8_t>* packet = instance->radio.getNextAppPacket<uint8_t>();
+                instance->processPacket(packet);
+                instance->radio.deletePacket(packet);
+            }
+        }
     }
 }
 
@@ -33,7 +40,16 @@ void MeshManager::init(const char* name) {
     radio.begin();
     radio.start();
 
-    radio.setReceiveAppData(processReceivedPackets);
+    TaskHandle_t receiveLoRaMessage_Handle = NULL;
+    xTaskCreate(
+        processReceivedPackets,
+        "Receive App Data",
+        4096,
+        NULL,
+        2,
+        &receiveLoRaMessage_Handle);
+
+    radio.setReceiveAppDataTaskHandle(receiveLoRaMessage_Handle);
 
     localId = radio.getLocalAddress();
 }
