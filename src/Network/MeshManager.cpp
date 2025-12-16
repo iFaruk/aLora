@@ -4,7 +4,7 @@
 
 MeshManager* MeshManager::instance = nullptr;
 
-MeshManager::MeshManager() : radio(LoRaMesher::getInstance()) {
+MeshManager::MeshManager() : radio(LoraMesher::getInstance()) {
     instance = this;
     peerCount = 0;
     onMessageReceived = nullptr;
@@ -264,7 +264,7 @@ bool MeshManager::getPeer(int index, MeshPeer* outPeer) {
     return ret;
 }
 
-MeshManager::MeshPeer* MeshManager::findPeer(uint16_t id) {
+MeshPeer* MeshManager::findPeer(uint16_t id) {
     // Expected to be called with mutex held
     for (int i = 0; i < peerCount; i++) {
         if (peers[i].id == id) return &peers[i];
